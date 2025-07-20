@@ -44,15 +44,22 @@ static int do_interact_window(struct window *win);
 
 static void sigwinch_handler(int sig);
 
-static void reset_tty(int sig)
+static void reset_tty_sig(int sig)
+{
+	(void)sig;
+	if (!raw_mode)
+		return;
+	if (tcsetattr(STDIN_FILENO, TCSANOW, &origin_termios) < 0)
+		perror_raw_die("Error resetting terminal attributes");
+	exit(EXIT_FAILURE);
+}
+
+static void reset_tty()
 {
 	if (!raw_mode)
 		return;
 	if (tcsetattr(STDIN_FILENO, TCSANOW, &origin_termios) < 0)
 		perror_raw_die("Error resetting terminal attributes");
-	if (sig == 0)
-		exit(EXIT_SUCCESS);
-	exit(EXIT_FAILURE);
 }
 
 int main(int argc, char **argv)
@@ -62,6 +69,8 @@ int main(int argc, char **argv)
 	int home_len;
 	int task_ret;
 	struct window_vec *windows;
+	struct window *win;
+	struct winsize ws;
 
 	mode = START;
 	argc--;
@@ -104,16 +113,15 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 	signal(SIGWINCH, sigwinch_handler);
-	signal(SIGABRT, reset_tty);
-	signal(SIGKILL, reset_tty);
-	signal(SIGINT, reset_tty);
-	signal(SIGTERM, reset_tty);
+	signal(SIGABRT, reset_tty_sig);
+	signal(SIGKILL, reset_tty_sig);
+	signal(SIGINT, reset_tty_sig);
+	signal(SIGTERM, reset_tty_sig);
+	atexit(reset_tty);
 
 	windows = window_vec_xalloc();
 	window_vec_load(windows, screen_store);
 	if (mode == START) {
-		struct winsize ws;
-		struct window *win;
 		char window_name[32] = { 0 };
 
 		tty_set_raw(STDIN_FILENO, &origin_termios);
@@ -129,12 +137,59 @@ int main(int argc, char **argv)
 		else
 			/* Failed or killed */
 			window_free(win);
-	} else
-		fprintf(stderr, "unimplemented --list and --attach options");
+	} else if (mode == LIST) {
+		if (argc != 0)
+			usage();
+		if (windows->nr == 0)
+			printf("No windows found.\n");
+		else {
+			for (size_t i = 0; i < windows->nr; i++) {
+				struct window *win = windows->windows[i];
+				assert(win);
+				printf("--------------------------------\n");
+				printf("[%zu]\n", i);
+				printf("  Name: %s\n", win->name);
+				printf("  TTY: %s\n", win->device);
+				printf("  Socket: %s\n", win->socket);
+			}
+		}
+		window_vec_free(windows);
+		return 0;
+	} else { /* mode == ATTACH */
+		size_t win_idx;
+		char *endptr;
+
+		assert(mode == ATTACH);
+		if (argc != 1)
+			usage();
+
+		win_idx = strtoul(*argv, &endptr, 10);
+		if (!*endptr && *argv)
+			win = window_vec_get(windows, win_idx);
+		else
+			win = window_vec_find(windows, *argv);
+		if (!win) {
+			fprintf(stderr, "Error: window '%s' not found\n",
+				*argv);
+			window_vec_free(windows);
+			exit(EXIT_FAILURE);
+		}
+
+		tty_set_raw(STDIN_FILENO, &origin_termios);
+		raw_mode = 1;
+		tty_get_winsize(STDIN_FILENO, &ws);
+		task_ret = do_interact_window(win);
+		if (task_ret == 0)
+			window_vec_add(windows, win);
+		else {
+			/* Failed or killed */
+			window_vec_remove(windows, win);
+		}
+	}
 	window_vec_save(windows, screen_store);
 	window_vec_free(windows);
 
-	reset_tty(0);
+	reset_tty();
 }
 
 #define FAIL(p)               \
@@ -151,7 +206,11 @@ static int do_interact_window(struct window *win)
 	fd_set read_set;
 	int ret;
 
-	sock_fd = socket_client_xstart(win->socket);
+	sock_fd = socket_client_start(win->socket);
+	if (sock_fd < 0) {
+		ferror_raw("Error connecting to socket %s", win->socket);
+		return -1;
+	}
 	nfds = sock_fd > STDIN_FILENO ? sock_fd + 1 : STDIN_FILENO + 1;
 	for (;;) {
 		char c;
@@ -186,7 +245,7 @@ static int do_interact_window(struct window *win)
 			if (n < 0)
 				FAIL(perror_raw("Error reading from socket"));
 			else if (n == 0)
-				FAIL(perror_raw("Socket closed by server"));
+				FAIL(ferror_raw("Socket closed"));
 			if (write(STDOUT_FILENO, sock_buf, n) != n)
 				FAIL(perror_raw("Error writing to STDOUT"));
 		} else if (FD_ISSET(STDIN_FILENO, &read_set)) {

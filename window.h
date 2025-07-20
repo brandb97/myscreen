@@ -25,6 +25,7 @@ void window_free(struct window *win);
 struct window_vec *window_vec_xalloc();
 void window_vec_free(struct window_vec *vec);
 void window_vec_add(struct window_vec *vec, struct window *win);
+void window_vec_remove(struct window_vec *vec, struct window *win);
 struct window *window_vec_get(struct window_vec *vec, size_t idx);
 struct window *window_vec_find(struct window_vec *vec, const char *name);
 void window_vec_load(struct window_vec *vec, const char *file);

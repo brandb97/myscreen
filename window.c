@@ -1,12 +1,12 @@
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <stddef.h>
-#include <assert.h>
 #include <string.h>
+#include <assert.h>
+#include <errno.h>
 #include <termios.h>
 #include <unistd.h>
-#include <errno.h>
+#include <fcntl.h>
 #include <sys/time.h>
 #include <sys/select.h>
 #include "compat_util.h"
@@ -167,6 +167,9 @@ struct window *window_xstart(char *name, struct termios *termios,
 		win->device = strdup(pty_info->slave_name);
 		win->socket = socket_path;
 		win->pid = pid;
+		if (win->name == NULL || win->device == NULL ||
+		    win->socket == NULL)
+			ferror_raw_die("Error allocating memory for window");
 		pty_info_free(pty_info);
 		return win;
 	}
@@ -217,6 +220,26 @@ void window_vec_free(struct window_vec *vec)
 	}
 }
 
+void window_vec_remove(struct window_vec *vec, struct window *win)
+{
+	assert(win);
+	assert(vec);
+	for (size_t i = 0; i < vec->nr; i++) {
+		if (vec->windows[i] == win) {
+			/* Found the window, remove it */
+			window_free(win);
+			vec->nr--;
+			if (i < vec->nr)
+				vec->windows[i] = vec->windows[vec->nr];
+			vec->windows[vec->nr] = NULL;
+			return;
+		}
+	}
+
+	/* Should never reach here */
+	ferror_raw_die("Error removing window: window not found in vector");
+}
+
 void window_vec_add(struct window_vec *vec, struct window *win)
 {
 	assert(win);
@@ -230,8 +253,9 @@ void window_vec_add(struct window_vec *vec, struct window *win)
 struct window *window_vec_get(struct window_vec *vec, size_t idx)
 {
 	assert(vec);
-	assert(idx < vec->nr);
-	return vec->windows[idx];
+	if (idx < vec->nr)
+		return vec->windows[idx];
+	return NULL;
 }
 
 struct window *window_vec_find(struct window_vec *vec, const char *name)
@@ -245,16 +269,259 @@ struct window *window_vec_find(struct window_vec *vec, const char *name)
 	return NULL;
 }
 
+static char *read_line(int fd)
+{
+	char **line_vec = NULL;
+	int nr = 0, alloc = 0;
+	char *line = NULL, *line_end;
+	size_t line_len;
+#define BUFSZ 256
+	static char buf[BUFSZ];
+	static int buf_len = 0;
+
+	/* See if we can get a line from buf first */
+	if (buf_len > 0) {
+		line_end = memchr(buf, '\n', buf_len);
+		if (line_end) {
+			/* Found a line */
+			size_t len = line_end - buf + 1; /* include '\n' */
+			line = (char *)calloc(1, len + 1);
+			memcpy(line, buf, len);
+
+			/* remove line from buffer */
+			buf_len -= len;
+			memmove(buf, line_end + 1, buf_len);
+			return line;
+		}
+	}
+
+	/*
+	 * Read a line from fd, the line is split into multiple
+	 * BUFSZ sized chunks, and stored in line_vec.
+	 */
+	for (;;) {
+		int n;
+
+		if ((n = read(fd, buf + buf_len, BUFSZ - buf_len)) < 0) {
+			fprintf(stderr, "Error reading from file descriptor\n");
+			goto cleanup;
+		}
+
+		buf_len += n;
+		line_end = memchr(buf, '\n', buf_len);
+		if (!line_end) {
+			if (buf_len != BUFSZ) {
+				line = (char *)calloc(1, buf_len + 2);
+				if (line == NULL) {
+					fprintf(stderr,
+						"Error allocating memory for line\n");
+					goto cleanup;
+				}
+				memcpy(line, buf, buf_len);
+				line[buf_len] = '\n';
+				line[buf_len + 1] = '\0';
+				ALLOC_GROW(line_vec, nr + 1, alloc);
+				line_vec[nr++] = line;
+				buf_len = 0; /* reset buffer */
+				break; /* no more data to read */
+			} else {
+				line = (char *)calloc(1, BUFSZ);
+				if (line == NULL) {
+					fprintf(stderr,
+						"Error allocating memory for line\n");
+					goto cleanup;
+				}
+				memcpy(line, buf, BUFSZ);
+				ALLOC_GROW(line_vec, nr + 1, alloc);
+				line_vec[nr++] = line;
+				buf_len = 0; /* reset buffer */
+			}
+		} else {
+			/* Found a line */
+			size_t len = line_end - buf + 1; /* include '\n' */
+			line = (char *)calloc(1, len + 1);
+			if (line == NULL) {
+				fprintf(stderr,
+					"Error allocating memory for line\n");
+				goto cleanup;
+			}
+
+			memcpy(line, buf, len);
+
+			/* remove line from buffer */
+			buf_len -= len;
+			memmove(buf, line_end + 1, buf_len);
+			ALLOC_GROW(line_vec, nr + 1, alloc);
+			line_vec[nr++] = line;
+			break;
+		}
+	}
+
+	/*
+	 * Now we finished reading a line, concatenate the lines in
+	 * line_vec into a single line.
+	 */
+	line_len = 0;
+	for (int i = 0; i < nr; i++) {
+		assert(line_vec[i]);
+		if (i != nr - 1)
+			line_len += BUFSZ;
+		else
+			/* 1 for trailing "\0" */
+			line_len += strlen(line_vec[i]) + 1;
+	}
+	line = (char *)calloc(1, line_len);
+	if (line == NULL) {
+		fprintf(stderr, "Error allocating memory for line\n");
+		goto cleanup;
+	}
+	for (int i = 0; i < nr; i++) {
+		char *start = line;
+		start += i * BUFSZ;
+		if (i != nr - 1)
+			memcpy(start, line_vec[i], BUFSZ);
+		else {
+			size_t len = line_len;
+			len -= (size_t)i * BUFSZ;
+			memcpy(start, line_vec[i], len - 1);
+			start[len - 1] = '\0';
+		}
+	}
+cleanup:
+	for (int i = 0; i < nr; i++)
+		free(line_vec[i]);
+	free(line_vec);
+	if (line && *line == '\n') {
+		free(line);
+		return NULL;
+	}
+	return line;
+}
+
 void window_vec_load(struct window_vec *vec, const char *file)
 {
-	/* WIP */
-	(void)vec; /* Unused parameter */
-	(void)file; /* Unused parameter */
+	char *line = NULL;
+	int fd;
+	/*
+	 * when loading window_vec, we still in the normal mode. So no need
+	 * to use ferror_raw() or perror_raw() here.
+	 */
+
+	assert(vec);
+	fd = open(file, O_RDONLY | O_CREAT, 0644);
+	if (fd < 0)
+		fprintf(stderr, "Error opening myscreen file: %s\n", file);
+	while ((line = read_line(fd))) {
+		char *name, *device, *socket, *start, *end;
+		pid_t pid;
+		int n;
+		struct window *win;
+
+		start = line;
+		end = strchr(start, ' ');
+		if (end == NULL) {
+			fprintf(stderr, "Error parsing myscreen file: %s\n",
+				file);
+			goto cleanup;
+		}
+		*end = '\0';
+		name = start;
+
+		start = end + 1;
+		end = strchr(start, ' ');
+		if (end == NULL) {
+			fprintf(stderr, "Error parsing myscreen file: %s\n",
+				file);
+			goto cleanup;
+		}
+		*end = '\0';
+		device = start;
+
+		start = end + 1;
+		end = strchr(start, ' ');
+		if (end == NULL) {
+			fprintf(stderr, "Error parsing myscreen file: %s\n",
+				file);
+			goto cleanup;
+		}
+		*end = '\0';
+		socket = start;
+
+		start = end + 1;
+		n = sscanf(start, "%d\n", &pid);
+		if (n != 1) {
+			fprintf(stderr, "Error parsing myscreen file: %s\n",
+				file);
+			goto cleanup;
+		}
+
+		win = (struct window *)malloc(sizeof(struct window));
+		if (win == NULL) {
+			fprintf(stderr,
+				"Error allocating memory for window struct\n");
+			goto cleanup;
+		}
+		win->name = strdup(name);
+		win->device = strdup(device);
+		win->socket = strdup(socket);
+		win->pid = pid;
+		if (win->name == NULL || win->device == NULL ||
+		    win->socket == NULL) {
+			fprintf(stderr, "Error allocating memory for window\n");
+			window_free(win);
+			goto cleanup;
+		}
+		window_vec_add(vec, win);
+
+		free(line);
+		line = NULL;
+	}
+
+cleanup:
+	free(line);
+	close(fd);
 }
 
 void window_vec_save(struct window_vec *vec, const char *file)
 {
-	/* WIP */
-	(void)vec; /* Unused parameter */
-	(void)file; /* Unused parameter */
+	/* we are definitely in raw mode here */
+	int fd;
+
+	assert(vec);
+	fd = open(file, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+	if (fd < 0) {
+		ferror_raw("Error opening myscreen file for writing: %s", file);
+		return;
+	}
+
+	for (size_t i = 0; i < vec->nr; i++) {
+		struct window *win = vec->windows[i];
+		char *buf;
+		size_t len;
+		int n;
+
+		assert(win);
+		assert(win->name && win->device && win->socket);
+		len = strlen(win->name) + 1 + strlen(win->device) + 1 +
+		      strlen(win->socket) + 1 + 10 +
+		      2; /* 10 for pid, 1 for \n, 1 for trailing '\0' */
+		buf = (char *)calloc(1, len);
+		if (!buf) {
+			ferror_raw("Error allocating memory for window string");
+			goto cleanup;
+		}
+		n = snprintf(buf, len, "%s %s %s %d\n", win->name, win->device,
+			     win->socket, win->pid);
+		/* snprintf must succeed */
+		assert(n > 0 && (size_t)n < len);
+		if (write(fd, buf, n) != n) {
+			ferror_raw("Error writing window to myscreen file: %s",
+				   file);
+			free(buf);
+			goto cleanup;
+		}
+	}
+
+cleanup:
+	close(fd);
 }

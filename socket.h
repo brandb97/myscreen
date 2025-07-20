@@ -7,6 +7,6 @@ int socket_server_xstart(const char *path);
 
 int socket_server_xaccept(int sockfd);
 
-int socket_client_xstart(const char *path);
+int socket_client_start(const char *path);
 
 #endif

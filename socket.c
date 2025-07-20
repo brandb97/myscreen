@@ -59,15 +59,17 @@ int socket_server_xaccept(int sockfd)
 	return fd;
 }
 
-int socket_client_xstart(const char *path)
+int socket_client_start(const char *path)
 {
 	int sockfd;
 	struct sockaddr_un addr;
 	fd_set write_set;
 
 	sockfd = socket(AF_UNIX, SOCK_STREAM, 0);
-	if (sockfd < 0)
-		perror_raw_die("Error socket() failed");
+	if (sockfd < 0) {
+		perror_raw("Error socket() failed");
+		return -1;
+	}
 
 	memset(&addr, 0, sizeof(addr));
 	addr.sun_family = AF_UNIX;
@@ -76,14 +78,18 @@ int socket_client_xstart(const char *path)
 	if (access(path, F_OK) == -1)
 		sleep(1);
 	while (connect(sockfd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		if (errno != EINPROGRESS)
-			perror_raw_die("Error connect() failed");
+		if (errno != EINPROGRESS) {
+			perror_raw("Error connect() failed");
+			return -1;
+		}
 
 		/* Wait for the socket to be writable and retry */
 		FD_ZERO(&write_set);
 		FD_SET(sockfd, &write_set);
-		if (select(sockfd + 1, NULL, &write_set, NULL, NULL) < 0)
-			perror_raw_die("Error waiting for connection");
+		if (select(sockfd + 1, NULL, &write_set, NULL, NULL) < 0) {
+			perror_raw("Error waiting for connection");
+			return -1;
+		}
 	}
 
 	return sockfd;
