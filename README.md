@@ -16,3 +16,6 @@ myscreen [-l|--list]
 ```
 myscreen [-a|--attach] winspec
 ```
+
+想写一个yourscreen？[这里](https://brandb97.github.io/src/post/myscreen/myscreen.html)是我为myscreen写的博客教程。
+
