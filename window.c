@@ -48,7 +48,7 @@ static void do_window_task(struct pty_info *pty_info, char *socket_path,
 	/* Start a socket daemon listen on socket_path */
 	socket_fd = socket_server_xstart(socket_path);
 	/* Start a child process runs on pty */
-	pty_xfork(pty_info, termios, ws, argv);
+	pty_xexec(pty_info, termios, ws, argv);
 
 	/*
 	 * This for loop never breaks, this daemon only exit when receive

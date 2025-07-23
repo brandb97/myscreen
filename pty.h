@@ -14,7 +14,7 @@ struct pty_info {
 
 struct pty_info *pty_info_xalloc();
 void pty_info_free(struct pty_info *info);
-pid_t pty_xfork(struct pty_info *info, struct termios *termios,
+pid_t pty_xexec(struct pty_info *info, struct termios *termios,
 		struct winsize *ws, char **argv);
 
 #endif
