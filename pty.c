@@ -105,14 +105,12 @@ pid_t pty_xexec(struct pty_info *info, struct termios *termios,
 			info->slave_name, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
-	if (dup2(open(info->slave_name, O_RDWR), STDOUT_FILENO) !=
-	    STDOUT_FILENO) {
+	if (dup2(slave_fd, STDOUT_FILENO) != STDOUT_FILENO) {
 		fprintf(stderr, "Error redirecting stdout to PTY '%s': %s\n",
 			info->slave_name, strerror(errno));
 		exit(EXIT_FAILURE);
 	}
-	if (dup2(open(info->slave_name, O_RDWR), STDERR_FILENO) !=
-	    STDERR_FILENO) {
+	if (dup2(slave_fd, STDERR_FILENO) != STDERR_FILENO) {
 		fprintf(stderr, "Error redirecting stderr to PTY '%s': %s\n",
 			info->slave_name, strerror(errno));
 		exit(EXIT_FAILURE);
